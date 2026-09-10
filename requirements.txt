@@ -1,0 +1,4 @@
+# System dependencies for ROS Noetic
+ros-noetic-desktop
+python3-rosdep
+liblapack-dev

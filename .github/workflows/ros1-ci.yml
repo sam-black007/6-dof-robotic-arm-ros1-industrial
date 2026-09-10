@@ -1,0 +1,24 @@
+name: ROS1 CI
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+    steps:
+      - uses: actions/checkout@v3
+      - name: Setup ROS Noetic
+        run: |
+          sudo sh -c 'echo "deb http://packages.ros.org/ros/ubuntu focal main" > /etc/apt/sources.list.d/ros-latest.list'
+          sudo apt-key adv --keyserver 'hkp://keyserver.ubuntu.com:80' --recv-key C1CF6E31E6BADE8868B172B4F42ED6FBAB17C654
+          sudo apt update
+          sudo apt install -y ros-noetic-desktop python3-rosdep
+          sudo rosdep init
+          rosdep update
+      - name: Build
+        run: |
+          mkdir -p ~/catkin_ws/src
+          cp -r . ~/catkin_ws/src/6dof
+          cd ~/catkin_ws
+          rosdep install --from-paths src --ignore-src -y
+          catkin_make
