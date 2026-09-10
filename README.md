@@ -3,6 +3,10 @@
 
 <img src="images/overview.png" width=800>
 
+## Architecture
+
+<img src="images/architecture.png" width=800>
+
 ### Why ROS 1 Noetic
 
 This project uses ROS 1 Noetic because it is the **industrialized standard** for robotic arm deployments. ROS 1 has been battle-tested in production environments for over a decade, with proven reliability for:
@@ -14,6 +18,8 @@ This project uses ROS 1 Noetic because it is the **industrialized standard** for
 - **Legacy support**: Existing hardware stacks, PLCs, and safety systems are certified for ROS 1
 
 ROS 2 migration is planned but requires re-validation of all safety certifications. ROS 1 Noetic remains the industrialized standard for production robotic arm systems through 2025 and beyond.
+
+<img src="images/ros1_vs_ros2.png" width=800>
 
 ## Repository Structure
 ```
@@ -37,6 +43,8 @@ ROS 2 migration is planned but requires re-validation of all safety certificatio
 └── .github/workflows/ # CI pipeline
 ```
 
+<img src="images/workspace_structure.png" width=800>
+
 ### Robot Model
 The robot URDF/Xacro model is included in `owr_description/urdf/`. Meshes are under `owr_description/meshes/`. The model is loaded via `owr_gazebo/robot_6dof_gazebo_spawn.launch`.
 
@@ -55,6 +63,10 @@ The 6-DOF kinematic chain consists of 7 links:
 | W3Eff_Link | `W3Eff_Link.STL` | Wrist 3-end effector (W3J) |
 
 Gripper meshes (Robotiq Arg2f 140) are under `owr_description/meshes/gripper/`.
+
+The kinematic chain (6 revolute joints + gripper):
+
+<img src="images/dof_axes.png" width=650>
 
 ### Installation
 Clone the repository using:
@@ -88,6 +100,36 @@ Launch moveit and rviz:
   </tr>
  </table>
 
+### Perception Pipeline
+The arm uses a RGB-D camera to build the collision scene. Here is the full data flow:
+
+<img src="images/perception_pipeline.png" width=800>
+
+### Motion Planning
+MoveIt plans obstacle-free motion using the IKFast solver and collision scene:
+
+<img src="images/moveit_planning_flow.png" width=800>
+
+### Inverse Kinematics
+The IKFast plugin solves 6 joint angles from a desired end-effector pose:
+
+<img src="images/ik_solver_flow.png" width=800>
+
+### Collision Checking
+The planning scene merges the octomap with the Allowed Collision Matrix:
+
+<img src="images/collision_checking.png" width=800>
+
+### Controlling the Arm
+You can command the arm through the RViz GUI, C++ nodes, or joint-trajectory messages:
+
+<img src="images/control_modes.png" width=800>
+
+### Pick and Place
+End-to-end manipulation sequence from detection to placement:
+
+<img src="images/pick_place_flow.png" width=800>
+
 ## Hardware Requirements
 
 | Component | Specification |
@@ -119,7 +161,10 @@ Launch moveit and rviz:
 Key launch parameters are in `owr_moveit_config/config/`. Joint limits and DH params are in `owr_description/urdf/`.
 
 ### Safety
+Safety is enforced at two levels: joint-limit monitoring and a hardware emergency-stop topic.
+
 <img src="images/safety.png" width=800>
+<img src="images/safety_workflow.png" width=800>
 
 * Never power servos directly from USB. Use external regulated supply.
 * Emergency stop topic: `/emergency_stop`
@@ -130,6 +175,11 @@ Key launch parameters are in `owr_moveit_config/config/`. Joint limits and DH pa
 <img src="images/launch_flow.png" width=800>
 
 ### Quick Start
+
+Follow this workflow to get from clone to running simulation:
+
+<img src="images/user_workflow.png" width=800>
+
 1. Build workspace: `catkin_make`
 2. Start Gazebo simulation: `roslaunch owr_gazebo robot_6dof_gazebo_spawn.launch`
 3. Start MoveIt: `roslaunch owr_moveit_config robot_6dof_moveit_sim.launch`
@@ -170,6 +220,16 @@ cat owr_moveit_config/config/joint_limits.yaml
 * **MoveIt Planning**: Use ompl planner for faster planning
 * **Gazebo Physics**: Reduce real_time_factor for slower but stable simulation
 * **Camera Data**: Reduce point cloud density for faster processing
+
+## Continuous Integration
+Every push and pull request is built and validated on Ubuntu 20.04 + ROS Noetic:
+
+<img src="images/ci_pipeline.png" width=800>
+
+## Industrial Hardening Summary
+This repository was hardened from the original project into an industrial baseline:
+
+<img src="images/hardening_summary.png" width=800>
 
 ## Contributing
 1. Fork the repository
