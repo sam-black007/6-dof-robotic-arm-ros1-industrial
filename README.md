@@ -40,6 +40,22 @@ ROS 2 migration is planned but requires re-validation of all safety certificatio
 ### Robot Model
 The robot URDF/Xacro model is included in `owr_description/urdf/`. Meshes are under `owr_description/meshes/`. The model is loaded via `owr_gazebo/robot_6dof_gazebo_spawn.launch`.
 
+<img src="images/robot_model_preview.png" width=800>
+
+The 6-DOF kinematic chain consists of 7 links:
+
+| Link | Mesh (collision) | Role |
+|------|------------------|------|
+| base_link | `base_link.STL` | Fixed base |
+| BS_Link | `BS_Link.STL` | Base shoulder (BJ) |
+| SE_Link | `SE_Link.STL` | Shoulder-elbow (SJ/EJ) |
+| EW1_Link | `EW1_Link.STL` | Elbow-wrist 1 (EJ/W1J) |
+| W12_Link | `W12_Link.STL` | Wrist 1-2 (W1J/W2J) |
+| W23_Link | `W23_Link.STL` | Wrist 2-3 (W2J/W3J) |
+| W3Eff_Link | `W3Eff_Link.STL` | Wrist 3-end effector (W3J) |
+
+Gripper meshes (Robotiq Arg2f 140) are under `owr_description/meshes/gripper/`.
+
 ### Installation
 Clone the repository using:
 

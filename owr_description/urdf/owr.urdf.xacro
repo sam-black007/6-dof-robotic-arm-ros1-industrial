@@ -101,9 +101,6 @@
                 <geometry>
                     <mesh filename="${bl_stl}" />
                 </geometry>
-                <geometry>
-                    <mesh filename="${bl_dae}"/>
-                </geometry>
                 <material name="LightGrey">
                     <color rgba="0.7 0.7 0.7 1.0"/>
                 </material>
