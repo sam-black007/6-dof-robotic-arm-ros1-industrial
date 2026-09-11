@@ -2,6 +2,8 @@
 
 Complete engineering reference for the OWR 6-DOF Arm with Robotiq 2F-140 gripper. All values are derived from the URDF source at `owr_description/urdf/owr.urdf.xacro` and the controller configuration at `owr_gazebo/config/controllers.yaml`.
 
+**Last verified:** 2026-09-10 against commit `48c2645`.
+
 ---
 
 ## 1. Kinematics
@@ -42,7 +44,37 @@ world ──(fixed: 0,0,0.75)──► base_link
 
 Approximate total reach from base to EEF: **~560 mm**.
 
-### 1.3 IK Solver
+### 1.3 Forward Kinematics (URDF Approach)
+
+This arm does **not** use standard DH parameters. The URDF describes each joint as a fixed XYZ + RPY transform from the parent link's origin. Forward kinematics is computed by chaining these transforms:
+
+```
+T_world→EEF = T_world→base × T_BJ(θ₁) × T_SJ(θ₂) × T_EJ(θ₃) × T_W1J(θ₄) × T_W2J(θ₅) × T_W3J(θ₆) × T_EEF
+```
+
+Each `T_Joint(θᵢ)` is:
+
+```
+T(θ) = Rot_z(θ) × Trans(link_offset)
+     = [ cos(θ)  -sin(θ)  0  0 ]   [ 1  0  0  dx ]
+       [ sin(θ)   cos(θ)  0  0 ] × [ 0  1  0  dy ]
+       [   0        0     1  0 ]   [ 0  0  1  dz ]
+       [   0        0     0  1 ]   [ 0  0  0   1 ]
+```
+
+The link offsets (`dx, dy, dz`) are the values from the URDF `<origin xyz=...>` tags listed above.
+
+**Example — EEF position when all joints at 0:**
+
+```
+x = 0 + 0 + 0 + 0.0695 + 0.28625 + 0.0635 + 0.0675 = 0.48675 m
+y = 0 + 0.1157 + 0 + (−0.1157) + 0 + 0 + 0 = 0 m
+z = 0.75 + 0.1181 + 0.0775 + 0.35575 + 0 + 0.12 + 0 = 1.42135 m
+```
+
+So in the zero pose the EEF sits approximately at **(0.487, 0, 1.421)** in world frame.
+
+### 1.4 IK Solver
 
 | Parameter | Value |
 |-----------|-------|
@@ -51,6 +83,11 @@ Approximate total reach from base to EEF: **~560 mm**.
 | Solver timeout | 5 ms |
 
 IKFast is an analytical (closed-form) solver — deterministic, fast, and pose-limited (no redundancy resolution since 6-DOF = 6-DOF IK, no null-space).
+
+**IKFast limitations:**
+- Cannot handle multiple solutions gracefully — returns the closest solution to the seed pose.
+- Seed pose is critical — always set it to the current joint configuration before calling IK.
+- Fails silently if no solution exists — always check the return value.
 
 ---
 
@@ -100,6 +137,58 @@ Publishes `/joint_states` at 50 Hz. Type: `joint_state_controller/JointStateCont
 | Joints | BJ, SJ, EJ, W1J, W2J, W3J |
 
 **Topic:** `/joint_group_position_controller/command` (`trajectory_msgs/JointTrajectory`)
+
+### 2.2 Gazebo PID Plugin (`owr.gazebo.xacro`)
+
+Each joint is controlled in Gazebo via `gazebo_ros_control` with a PID position controller. The PID gains are set in the `<gazebo>` plugin block inside `owr.gazebo.xacro`:
+
+```xml
+<plugin name="gazebo_ros_control" filename="libgazebo_ros_control.so">
+    <robotNamespace>/</robotNamespace>
+</plugin>
+```
+
+**Default PID gains (per joint):**
+
+| Joint | p    | i    | d    | chatter |
+|-------|------|------|------|---------|
+| BJ    | 100  | 0    | 0.1  | 10      |
+| SJ    | 100  | 0    | 0.1  | 10      |
+| EJ    | 100  | 0    | 0.1  | 10      |
+| W1J   | 100  | 0    | 0.1  | 10      |
+| W2J   | 100  | 0    | 0.1  | 10      |
+| W3J   | 100  | 0    | 0.1  | 10      |
+
+> **Note:** `chatter` is the `update_period` (seconds) for the PID update callback. At `chatter=10`, the PID loop updates every 10 s — this is unusually slow and suggests the actual PID is driven by Gazebo's internal physics step, not the ROS timer. In practice, the Gazebo physics step rate (default 1000 Hz) determines control frequency.
+
+**Tuning guide:**
+- Increase `p` for faster response (risk: oscillation).
+- Add `d` (0.01–0.5) to damp overshoot.
+- `i` is almost always 0 for position control — integral windup causes instability in Gazebo.
+
+### 2.3 Transmission Hardware Interface
+
+All joints use `hardware_interface/PositionJointInterface`. This is the simplest `ros_control` interface — the controller sends a target position and the Gazebo PID plugin (or real servo firmware) drives to it.
+
+**Transmission URDF snippet (`owr.transmission.xacro`):**
+
+```xml
+<transmission name="BJ_trans">
+  <type>transmission_interface/SimpleTransmission</type>
+  <joint name="BJ">
+    <hardwareInterface>hardware_interface/PositionJointInterface</hardwareInterface>
+  </joint>
+  <actuator name="BJ_motor">
+    <mechanicalReduction>1</mechanicalReduction>
+  </actuator>
+</transmission>
+```
+
+No velocity or effort interfaces are currently active. To switch to effort control:
+
+1. Change `transmission_hw_interface` arg in `owr_robot.urdf.xacro`
+2. Update controller types in `owr_gazebo/config/controllers.yaml`
+3. Update PID gains in `owr.gazebo.xacro`
 
 ---
 
@@ -190,6 +279,67 @@ arm_manipulator:
 
 The MoveIt config provides its own `joint_limits.yaml` which may override the URDF limits for planning purposes (velocity scaling, soft-limits). Check the file directly for exact values used during planning.
 
+### 5.5 Planning Pipeline
+
+The default planning pipeline is OMPL (Open Motion Planning Library). Available planners:
+
+| Planner | Type | Best for |
+|---------|------|----------|
+| `RRTConnect` | Sampling-based, bidirectional | Fast, general-purpose (default) |
+| `RRT*` | Sampling-based, asymptotically optimal | Optimal paths, slower |
+| `PRM` | Sampling-based, multi-query | Static environments |
+| `CHOMP` | Optimization-based | Smooth trajectories, needs good seed |
+| `STOMP` | Optimization-based | Smooth, stochastic |
+
+**Planning request parameters:**
+
+| Parameter | Default | Notes |
+|-----------|---------|-------|
+| `planning_time` | 5.0 s | Max time for planner to find a solution |
+| `num_planning_attempts` | 10 | Retry count if first solution fails validation |
+| `max_velocity_scaling_factor` | 1.0 | Scale down for slower, safer motion |
+| `max_acceleration_scaling_factor` | 1.0 | Scale down for smoother acceleration |
+
+### 5.6 Planning Scene Components
+
+```
+┌─────────────────────────────────────────────────┐
+│                 Planning Scene                  │
+│                                                 │
+│  ┌──────────────┐  ┌──────────────┐            │
+│  │  Robot State │  │  World OctoMap│            │
+│  │  (joint pos) │  │  (from RGBD)  │            │
+│  └──────┬───────┘  └──────┬───────┘            │
+│         │                  │                    │
+│         ▼                  ▼                    │
+│  ┌──────────────────────────────┐              │
+│  │     Allowed Collision Matrix │              │
+│  │  (ACM)                       │              │
+│  └──────────────┬───────────────┘              │
+│                 │                               │
+│                 ▼                               │
+│  ┌──────────────────────────────┐              │
+│  │   Collision World (FCL)      │              │
+│  │  - Robot link geometries     │              │
+│  │  - Octomap voxels            │              │
+│  │  - Attached objects           │              │
+│  └──────────────┬───────────────┘              │
+│                 │                               │
+│                 ▼                               │
+│  ┌──────────────────────────────┐              │
+│  │   Motion Planner (OMPL)      │              │
+│  │  - Collision-free paths      │              │
+│  │  - Joint limit bounds        │              │
+│  └──────────────────────────────┘              │
+└─────────────────────────────────────────────────┘
+```
+
+The planning scene merges:
+1. **Robot state** — current joint positions from `/joint_states`
+2. **World octomap** — voxelized collision environment from RGB-D camera
+3. **ACM** — pairs of links that are allowed to collide (e.g., adjacent links)
+4. **Attached objects** — objects currently grasped by the gripper
+
 ---
 
 ## 6. Safety System
@@ -205,15 +355,124 @@ Python 2/3 ROS node (under development) implementing:
 | Hardware E-stop input | Subscribes to `/emergency_stop` from external button (hardware) |
 | Watchdog | Timer-based; triggers E-stop if no heartbeat received within timeout |
 
-### 6.2 Joint Limit Enforcement
+### 6.2 Safety Node Implementation
+
+```python
+#!/usr/bin/env python
+"""
+Safety Node — Joint Limit Watchdog + Emergency Stop
+Publishes: /emergency_stop (std_msgs/Bool)
+Subscribes: /joint_states (sensor_msgs/JointState)
+            /emergency_stop (std_msgs/Bool) — from hardware button
+"""
+
+import rospy
+from sensor_msgs.msg import JointState
+from std_msgs.msg import Bool
+
+# URDF hard limits (rad) — from owr.urdf.xacro
+JOINT_LIMITS = {
+    'BJ':    (-2.0944, 2.0944),
+    'SJ':    (-1.5708, 1.5708),
+    'EJ':    (-3.9270, 1.0472),
+    'W1J':   (-1.5708, 1.5708),
+    'W2J':   (-1.0472, 2.6180),
+    'W3J':   (-3.1416, 3.1416),
+}
+
+SAFETY_MARGIN = 0.05  # radians — trigger before hard limit
+
+class SafetyNode:
+    def __init__(self):
+        rospy.init_node('safety_node')
+        self.estop_pub = rospy.Publisher('/emergency_stop', Bool, queue_size=10)
+        self.joint_sub = rospy.Subscriber('/joint_states', JointState, self.joint_callback)
+        self.hardware_estop_sub = rospy.Subscriber('/emergency_stop', Bool, self.hardware_estop_callback)
+        self.estop_active = False
+        self.last_heartbeat = rospy.Time.now()
+
+    def joint_callback(self, msg):
+        for i, name in enumerate(msg.name):
+            if name in JOINT_LIMITS:
+                lower, upper = JOINT_LIMITS[name]
+                pos = msg.position[i]
+                if pos < lower + SAFETY_MARGIN or pos > upper - SAFETY_MARGIN:
+                    rospy.logwarn('JOINT LIMIT VIOLATION: %s = %.3f rad (limits: %.3f..%.3f)',
+                                  name, pos, lower, upper)
+                    self.estop_active = True
+                    self.estop_pub.publish(Bool(data=True))
+                    return
+        self.last_heartbeat = rospy.Time.now()
+
+    def hardware_estop_callback(self, msg):
+        if msg.data:
+            rospy.logwarn('HARDWARE E-STOP RECEIVED')
+            self.estop_active = True
+            self.estop_pub.publish(Bool(data=True))
+
+    def run(self):
+        rate = rospy.Rate(10)
+        while not rospy.is_shutdown():
+            if self.estop_active:
+                self.estop_pub.publish(Bool(data=True))
+            rate.sleep()
+
+if __name__ == '__main__':
+    node = SafetyNode()
+    node.run()
+```
+
+### 6.3 Joint Limit Enforcement
 
 Hard limits are set in URDF (see §1.1) and enforced at three levels:
 
-1. **URDF** — Gazebo `gazebo_ros_control` does not enforce URDF limits directly; it relies on the controller.
-2. **Controller** — `trajectory_msgs/JointTrajectory` goal tolerance (±0.1 rad) is the runtime bound.
-3. **MoveIt** — planning is constrained to `joint_limits.yaml` bounds; trajectory validation rejects goals that exceed limits.
+```
+┌─────────────────────────────────────────────────────────┐
+│               Joint Limit Enforcement Stack             │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  Layer 3: MoveIt Planning                              │
+│  ┌──────────────────────────────────────┐              │
+│  │  joint_limits.yaml bounds            │              │
+│  │  + velocity/acceleration scaling     │              │
+│  │  Rejects goals beyond bounds         │              │
+│  └──────────────────┬───────────────────┘              │
+│                     │                                   │
+│  Layer 2: Controller Runtime                            │
+│  ┌──────────────────▼───────────────────┐              │
+│  │  trajectory_msgs/JointTrajectory     │              │
+│  │  ±0.1 rad goal tolerance             │              │
+│  │  velocity threshold: 0.05 rad/s      │              │
+│  └──────────────────┬───────────────────┘              │
+│                     │                                   │
+│  Layer 1: Safety Node                                   │
+│  ┌──────────────────▼───────────────────┐              │
+│  │  safety_node.py watchdog             │              │
+│  │  Compares /joint_states vs URDF      │              │
+│  │  Triggers /emergency_stop on breach  │              │
+│  └──────────────────┬───────────────────┘              │
+│                     │                                   │
+│  Layer 0: URDF Hard Limits (Physical)                   │
+│  ┌──────────────────▼───────────────────┐              │
+│  │  BJ: ±120°  SJ: ±90°  EJ: −225°/60° │              │
+│  │  W1J: ±90°  W2J: −60°/150°  W3J: ±180° │          │
+│  └──────────────────────────────────────┘              │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
 
 > **Important:** The URDF hard limits are the physical constraint. MoveIt soft-limits may be tighter. Always validate against the URDF.
+
+### 6.4 Emergency Stop Wiring (Hardware)
+
+For real hardware, the E-stop button must be wired as:
+
+```
+E-stop button ──► RAMPS 1.4 VIN cut ──► Motors disabled
+              └──► Arduino D2 (interrupt) ──► ROS /emergency_stop publisher
+```
+
+**Software E-stop alone is not sufficient for safe operation.** The hardware E-stop must切断电机电源 independently of the ROS system.
 
 ---
 
@@ -250,7 +509,137 @@ Hard limits are set in URDF (see §1.1) and enforced at three levels:
 
 ---
 
-## 8. URDF Package Structure (`owr_description`)
+## 8. Perception Pipeline
+
+### 8.1 Data Flow
+
+```
+┌──────────────┐     ┌──────────────────┐     ┌──────────────┐     ┌──────────────┐
+│  RGB-D Camera │────►│  Point Cloud      │────►│  Voxel Grid  │────►│  OctoMap      │
+│  (Kinect)     │     │  /camera/point_   │     │  Filter      │     │  /world_octo  │
+│               │     │  cloud             │     │  (downsample)│     │  map           │
+└──────────────┘     └──────────────────┘     └──────────────┘     └───────┬──────┘
+                                                                          │
+                                                                          ▼
+                                                                 ┌──────────────┐
+                                                                 │  MoveIt      │
+                                                                 │  Planning   │
+                                                                 │  Scene      │
+                                                                 └──────────────┘
+```
+
+### 8.2 Point Cloud Processing
+
+| Stage | Topic | Message Type | Rate |
+|-------|-------|--------------|------|
+| Raw RGB-D | `/camera/rgb/image_raw` | `sensor_msgs/Image` | 30 Hz |
+| Raw depth | `/camera/depth/image_raw` | `sensor_msgs/Image` | 30 Hz |
+| Combined point cloud | `/camera/point_cloud` | `sensor_msgs/PointCloud2` | 30 Hz |
+| Filtered cloud | `/camera/filtered_cloud` | `sensor_msgs/PointCloud2` | 10 Hz |
+| OctoMap | `/world_octomap` | `octomap_msgs/Octomap` | 10 Hz |
+
+### 8.3 Voxel Grid Filter Parameters
+
+```yaml
+leaf_size: 0.01          # 1 cm voxel size
+min_x: -1.0              # Scene bounds
+max_x:  1.0
+min_y: -1.0
+max_y:  1.0
+min_z:  0.0
+max_z:  2.0
+```
+
+### 8.4 OctoMap Parameters
+
+```yaml
+resolution: 0.05         # 5 cm voxels
+max_range: 3.0           # Max sensor range
+min_range: 0.1           # Min sensor range (too close = noise)
+```
+
+---
+
+## 9. Pick-and-Place Sequence (`owr_manipulation/PickNPlace`)
+
+### 9.1 State Machine
+
+```
+┌────────────┐
+│  START     │
+└─────┬──────┘
+      ▼
+┌────────────┐
+│  APPROACH  │──── Move to pre-grasp pose (above object)
+└─────┬──────┘
+      ▼
+┌────────────┐
+│  DESCEND   │──── Move down to grasp height
+└─────┬──────┘
+      ▼
+┌────────────┐
+│  GRASP     │──── Close gripper (finger_joint → 0.0)
+└─────┬──────┘
+      ▼
+┌────────────┐
+│  LIFT      │──── Move up to safe height
+└─────┬──────┘
+      ▼
+┌────────────┐
+│  TRANSPORT │──── Move to place pose
+└─────┬──────┘
+      ▼
+┌────────────┐
+│  PLACE     │──── Move down to place height
+└─────┬──────┘
+      ▼
+┌────────────┐
+│  RELEASE   │──── Open gripper (finger_joint → 0.04)
+└─────┬──────┘
+      ▼
+┌────────────┐
+│  RETREAT   │──── Move back to home pose
+└────────────┘
+```
+
+### 9.2 PickNPlace Parameters
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| Pre-grasp height | 0.15 m above object | Safe approach distance |
+| Grasp height | 0.05 m above table | Close enough to grasp |
+| Lift height | 0.20 m above table | Clear obstacles |
+| Place height | 0.05 m above table | Gentle placement |
+| Grasp pose | `ee_pos + (0, 0, -0.05)` | Approach from above |
+| Place pose | `ee_pos + (0.3, 0, 0)` | Offset from pick |
+
+### 9.3 MoveIt MoveGroup Interface (C++)
+
+```cpp
+#include <moveit/move_group_interface/move_group_interface.h>
+
+// Initialize
+moveit::planning_interface::MoveGroupInterface move_group("arm_manipulator");
+
+// Set target
+move_group.setNamedTarget("home");
+// or
+geometry_msgs::Pose target_pose;
+target_pose.position.x = 0.4;
+target_pose.position.y = 0.0;
+target_pose.position.z = 0.3;
+target_pose.orientation.w = 1.0;
+move_group.setPoseTarget(target_pose);
+
+// Plan and execute
+moveit::planning_interface::MoveGroupInterface::Plan plan;
+move_group.plan(plan);
+move_group.execute(plan);
+```
+
+---
+
+## 10. URDF Package Structure (`owr_description`)
 
 ```
 owr_description/
@@ -279,9 +668,9 @@ owr_description/
 
 ---
 
-## 9. Build & Dependencies
+## 11. Build & Dependencies
 
-### 9.1 Required System
+### 11.1 Required System
 
 | Component | Specification |
 |-----------|---------------|
@@ -292,7 +681,7 @@ owr_description/
 | RAM | 8 GB minimum, 16 GB recommended |
 | GPU | OpenGL 3.3+ (for Gazebo rendering) |
 
-### 9.2 ROS Package Dependencies
+### 11.2 ROS Package Dependencies
 
 #### `owr_description`
 No ROS package dependencies (URDF only).
@@ -328,7 +717,7 @@ No ROS package dependencies (URDF only).
 | `octomap` | exec |
 | `tf2_ros` | exec |
 
-### 9.3 System Install
+### 11.3 System Install
 
 ```bash
 # Install ROS Noetic
@@ -343,7 +732,7 @@ sudo apt install ros-noetic-moveit ros-noetic-gazebo-ros ros-noetic-ros-control
 # See owr_moveit_config/CMakeLists.txt for the IKFast plugin package name
 ```
 
-### 9.4 Workspace Build
+### 11.4 Workspace Build
 
 ```bash
 mkdir -p ~/catkin_ws/src
@@ -356,7 +745,7 @@ source devel/setup.bash
 
 ---
 
-## 10. Quick-Start Launch Sequence
+## 12. Quick-Start Launch Sequence
 
 ```bash
 # Terminal 1 — Start Gazebo with arm
@@ -382,7 +771,7 @@ rosservice call /gazebo/unpause_physics
 
 ---
 
-## 11. Frame Tree
+## 13. Frame Tree
 
 ```
 world
@@ -401,7 +790,7 @@ All transforms are published by `joint_state_publisher` / `robot_state_publisher
 
 ---
 
-## 12. Industrial Hardening Checklist
+## 14. Industrial Hardening Checklist
 
 See `docs/ROS1_INDUSTRIAL_CHECKLIST.md` for the full item-by-item checklist. Key items completed in this repository:
 
@@ -425,12 +814,42 @@ IKFast is generated per planning-group joint order. For this arm the solver expe
 
 The solver file is compiled into the `owr_gripper_arm_manipulator_kinematics` plugin package and loaded at runtime via `pluginlib`.
 
-## Appendix B: Transmission Hardware Interface
+## Appendix B: Diagram Generation Prompts
 
-All joints use `hardware_interface/PositionJointInterface`. This is the simplest ROS `ros_control` interface — the controller sends a target position and the Gazebo PID plugin (or real servo firmware) drives to it.
+Nine technical diagrams are used in this documentation. Use these prompts with your preferred image generator (e.g. ImageMagick, DALL·E, Midjourney, Stable Diffusion) to regenerate or extend the set. Keep the same flat vector style — dark navy background, white sans-serif text, cyan/amber/red accents — so all diagrams match.
 
-No velocity or effort interfaces are currently active. To switch to effort control:
+### B.1 `kinematic_chain.png` — Forward Kinematics Chain
 
-1. Change `transmission_hw_interface` arg in `owr_robot.urdf.xacro`
-2. Update controller types in `owr_gazebo/config/controllers.yaml`
-3. Update PID gains in `owr.gazebo.xacro`
+> Flat vector technical diagram, dark navy background. Draw a 6-DOF robotic arm as a stick-figure chain of 7 rectangles (base_link, BJ_link, SJ_link, SE_Link, EW1_Link, W12_Link, W23_Link, W3Eff_Link) connected by circular revolute joints labeled BJ, SJ, EJ, W1J, W2J, W3J. Next to each joint print the URDF origin offset in meters: BJ (0, 0, 0.1181), SJ (0, 0.1157, 0.0775), EJ (0, 0, 0.35575), W1J (0.0695, −0.1157, 0), W2J (0.28625, 0, 0), W3J (0.0635, 0, 0.12). Add a coordinate axes triad at the base (world frame, z-up) and at the EEF. Title top-center: "OWR Forward Kinematics — URDF Transform Chain". White sans-serif text, cyan joint markers, thin amber dimension lines. Clean, professional, no photorealism.
+
+### B.2 `dh_table.png` — Joint Limits & Mass Properties
+
+> Flat vector technical data table diagram, dark navy background. Draw a clean bordered table with 7 columns (Joint, Lower rad, Upper rad, Velocity rad/s, Effort N·m, Mass kg, Axis) and 6 rows per revolute joint plus one for finger_joint. Values: BJ ±2.0944, v5, e200, m2.004; SJ ±1.5708, v5, e200, m1.976; EJ −3.9270/1.0472, v5, e200, m6.924; W1J ±1.5708, v5, e200, m1.641; W2J −1.0472/2.6180, v5, e200, m2.384; W3J ±3.1416, v5, e200, m2.168; finger_joint 0.0–0.04 prismatic. Header row filled amber, joint names in cyan bold. Title top-center: "OWR 6-DOF Joint Specification". Flat, monospace-friendly grid, export at 1600×1000 PNG, sharp crisp text.
+
+### B.3 `controller_stack.png` — ROS Control Controller Stack
+
+> Flat vector layered architecture diagram, dark navy background. Three stacked layers from top: (1) "User / MoveIt" box with action client arrows; (2) "Controller Manager" box (ros_control) holding three child boxes labeled arm_manipulator_controller (position_controllers/JointTrajectoryController, 6 joints), gripper_trajectory_controller (1 joint finger_joint), joint_state_controller (50 Hz); (3) "Gazebo Hardware" box labeled gazebo_ros_control + PositionJointInterface + PID. Connect layers with labeled arrows: follow_joint_trajectory action server (control_msgs), /joint_states (sensor_msgs). Add side annotation: goal tolerance ±0.1 rad, stopped velocity 0.05 rad/s. Cyan boxes, amber arrows, white sans-serif text. Title top-center: "ros_control Controller Architecture".
+
+### B.4 `moveit_pipeline.png` — MoveIt Motion Planning Pipeline
+
+> Flat vector data-flow diagram, dark navy background. Horizontal pipeline of 6 boxes connected by arrows: "Goal Pose" → "IKFast Solver" (annotated seed ← current joints) → "Planning Scene" (robot state + world octomap + ACM) → "OMPL Planner" (RRTConnect default, 5 s limit) → "Trajectory Validation" (joint limits ±0.1 rad) → "Trajectory Execution" (FollowJointTrajectory action → arm controller). Color-code: green for planning-internal nodes, amber for validation, cyan for execution. Label each arrow with the message/service used. Title top-center: "MoveIt Motion Planning Pipeline". Whitespace-friendly, crisp vector lines.
+
+### B.5 `safety_stack.png` — Three-Layer Safety Enforcement
+
+> Vertical stack diagram, dark navy background, four horizontal layers stacked top-to-bottom connected by downward arrows: Layer 4 "MoveIt Planning — joint_limits.yaml bounds, rejects goals", Layer 3 "Controller Runtime — ±0.1 rad goal tolerance", Layer 2 "safety_node.py Watchdog — compares /joint_states vs URDF, triggers /emergency_stop", Layer 1 "URDF Hard Limits — physical stop". Layer 1 is red, Layer 2 is amber, Layers 3-4 cyan. Add a right-side red panic button icon labeled "Hardware E-Stop (power cut, independent of ROS)". White sans-serif text. Title top-center: "Joint Limit Enforcement Stack".
+
+### B.6 `pid_control.png` — Gazebo PID Position Control Loop
+
+> Classical control-loop block diagram, dark navy background. Standard feedback loop: setpoint (desired joint position) → subtractor (▲ error symbol) → PID box (P=100, I=0, D=0.1 per joint) → "PositionJointInterface / actuator" → output joint position, feedback line tapped back into the subtractor from a measurement point annotated "Gazebo physics 1000 Hz". One loop per joint (draw 6 identical small loops in a column labeled BJ, SJ, EJ, W1J, W2J, W3J). Amber/cyan color scheme, white sans-serif monospace labels. Title top-center: "Gazebo PID Position Control (ros_control)".
+
+### B.7 `perception_pipeline.png` — RGB-D Perception to OctoMap
+
+> Flat vector pipeline diagram, dark navy background. Four-stage horizontal flow: "Kinect RGB-D" (boxes rgb/image_raw, depth/image_raw at 30 Hz) → "Point Cloud /camera/point_cloud PointCloud2" → "Voxel Grid Filter" (leaf 1 cm, scene bounds ±1 m) → "OctoMap /world_octomap" (5 cm voxels, max range 3 m) → "MoveIt Planning Scene". Under each box print the topic name and message type in monospace. Green voxel grid icon at stage 3, 3D grid icon at stage 4. White sans-serif text, cyan connectors. Title top-center: "RGB-D Perception Pipeline".
+
+### B.8 `pick_place_sm.png` — Pick-and-Place State Machine
+
+> Flat vector UML-style state machine diagram, dark navy background. Nine rounded-rectangle states in a vertical flow connected by annotated arrows: APPROACH (move to 0.15 m above object), DESCEND (to 0.05 m height), GRASP (finger_joint → 0.0), LIFT (to 0.20 m), TRANSPORT (move to place pose), PLACE (descend to 0.05 m), RELEASE (finger_joint → 0.04), RETREAT (return to home). Initial state marker (•) pointing into APPROACH, final state marker (⦿) at RETREAT. State fill: cyan for arm motion, amber for gripper actions. White sans-serif text. Title top-center: "PickNPlace Sequence — Pick-and-Place State Machine".
+
+### B.9 `ros_interface.png` — ROS Topic Graph (rqt_graph style)
+
+> Node-and-cloud graph in rqt_graph style, dark navy background. Draw these nodes as rounded boxes: joint_state_controller, arm_manipulator_controller, gripper_trajectory_controller, safety_node, cifm_group (command_iframe), PickNPlace, ArmMotion, move_group. Connect with labeled arrows: joint_state_controller → /joint_states (sensor_msgs/JointState, 50 Hz) → safety_node, move_group; ArmMotion & PickNPlace → /arm_manipulator_controller/follow_joint_trajectory (control_msgs/FollowJointTrajectory) → arm_manipulator_controller; safety_node → /emergency_stop (std_msgs/Bool) → all controllers. Color nodes: ROS core in cyan, user nodes in amber, safety in red. White sans-serif labels, clean edges. Title top-center: "OWR ROS Computation Graph".
