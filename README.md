@@ -1,221 +1,186 @@
-# 6-DOF Robotic Arm — ROS 1 Noetic Industrial Baseline
+# 6-DOF Robotic Arm — ROS 1 Noetic (Industrial Baseline)
 
-> **Author:** sam-black007 · **License:** MIT · **ROS distro:** Noetic (EOL — maintenance mode only)  
-> **Repo:** [sam-black007/6-dof-robotic-arm-ros1-industrial](https://github.com/sam-black007/6-dof-robotic-arm-ros1-industrial)
+![MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+![ROS](https://img.shields.io/badge/ROS-Noetic-brightgreen.svg)
 
-Hardened industrial baseline for the OWR 6-DOF arm with Robotiq 2F-140 gripper, Gazebo simulation, and MoveIt motion planning.
+Hardened industrial reference for the OWR 6-DOF arm with Robotiq 2F-140 gripper: full Gazebo simulation, MoveIt motion planning (IKFast), and a safety layer with emergency-stop support.
 
-<img src="images/architecture.png" width=800>
+- **Author:** [sam-black007](https://github.com/sam-black007)
+- **Repository:** [sam-black007/6-dof-robotic-arm-ros1-industrial](https://github.com/sam-black007/6-dof-robotic-arm-ros1-industrial)
+- **Status:** maintenance mode. ROS 1 Noetic is EOL; use for legacy systems only.
 
----
-
-## 1. Robot Specification
-
-### 1.1 Kinematic Chain
-
-```
-world ──(0,0,0.75)──► base_link ──BJ──► BJ_link ──SJ──► SJ_link
-──EJ──► SE_Link ──W1J──► EW1_Link ──W2J──► W12_Link ──W3J──► W23_Link ──(fixed)──► W3Eff_Link ──(fixed)──► EEF_Link
-```
-
-Total reach (base → EEF): **~560 mm**
-
-<img src="images/dof_axes.png" width=500>
-
-### 1.2 Joint Table
-
-| Joint | Lower | Upper | Δ Range | Velocity | Effort | Mass (link) |
-|-------|-------|-------|---------|----------|--------|-------------|
-| `BJ`  | −120° (−2.0944 rad) | 120° (2.0944 rad) | 240° | 5 rad/s | 200 N·m | 2.004 kg |
-| `SJ`  | −90° (−1.5708 rad) | 90° (1.5708 rad) | 180° | 5 rad/s | 200 N·m | 1.976 kg |
-| `EJ`  | −225° (−3.9270 rad) | 60° (1.0472 rad) | 285° | 5 rad/s | 200 N·m | 6.924 kg |
-| `W1J` | −90° (−1.5708 rad) | 90° (1.5708 rad) | 180° | 5 rad/s | 200 N·m | 1.641 kg |
-| `W2J` | −60° (−1.0472 rad) | 150° (2.6180 rad) | 210° | 5 rad/s | 200 N·m | 2.384 kg |
-| `W3J` | −180° (−3.1416 rad) | 180° (3.1416 rad) | 360° | 5 rad/s | 200 N·m | 2.168 kg |
-
-All joints: `PositionJointInterface`, `SimpleTransmission`, 1:1 mechanical reduction.
-
-Gripper: `finger_joint` (prismatic, 0–40 mm stroke, Robotiq 2F-140).
-
-### 1.3 Hardware
-
-| Component | Spec |
-|-----------|------|
-| Controller | Arduino Mega 2560 + RAMPS 1.4 |
-| Motors | NEMA 17 stepper (42BYGH47) |
-| Power | 12 V 5 A DC regulated — **never USB** |
-| Compute | Ubuntu 20.04, 8 GB RAM min, GPU with OpenGL 3.3+ |
+<img src="images/architecture.png" width="760">
 
 ---
 
-## 2. Controller Stack
+## 1. Robot
 
-### 2.1 Active Controllers
+| | |
+|---|---|
+| Kinematics | 6 × revolute (Z-axis), URDF transform chain |
+| Reach | ~560 mm base → end-effector |
+| Gripper | Robotiq 2F-140, prismatic `finger_joint` (0–40 mm) |
+| Real hardware | Arduino Mega 2560 + RAMPS 1.4, NEMA 17 (42BYGH47), 12 V 5 A supply |
 
-| Controller | Type | Joints | Action Server |
+**Joint specification** (URDF hard limits):
+
+| Joint | Range (deg) | Vel (rad/s) | Effort (N·m) | Link mass (kg) |
+|-------|-------------|-------------|--------------|----------------|
+| `BJ`  | −120 … +120 | 5 | 200 | 2.004 |
+| `SJ`  | −90 … +90   | 5 | 200 | 1.976 |
+| `EJ`  | −225 … +60  | 5 | 200 | 6.924 |
+| `W1J` | −90 … +90   | 5 | 200 | 1.641 |
+| `W2J` | −60 … +150  | 5 | 200 | 2.384 |
+| `W3J` | −180 … +180 | 5 | 200 | 2.168 |
+
+<img src="images/dh_table.png" width="760">
+<img src="images/kinematic_chain.png" width="760">
+<img src="images/robot_model_preview.png" width="640">
+
+---
+
+## 2. Software Stack
+
+| Layer | Technology |
+|-------|------------|
+| Middleware | ROS Noetic 1.16, `roscpp` / `rospy` |
+| Simulation | Gazebo 11 (`PositionJointInterface`) |
+| Motion planning | MoveIt 1.1, IKFast analytical solver |
+| Trajectory control | `ros_control` joint trajectory controllers |
+| Perception | RGB-D point cloud → OctoMap planning scene |
+
+**Packages**
+
+| Package | Contents |
+|---------|----------|
+| `owr_description` | URDF/Xacro, collision meshes (STL), transmissions, Gazebo plugins |
+| `owr_gazebo` | World files, controllers, PID gains, robot spawn / control launch |
+| `owr_moveit_config` | SRDF, IKFast config, joint limits, planning pipeline, controller interface |
+| `owr_manipulation` | C++ nodes (`ArmMotion`, `PickNPlace`, …) + Python `safety_node` |
+| `owr_gripper_ikfast_arm_manipulator_plugin` | IKFast solver plugin for MoveIt |
+
+---
+
+## 3. Control & ROS Interface
+
+Controllers are managed by `ros_control` and defined in `owr_gazebo/config/controllers.yaml`.
+
+| Controller | Type | Joints | Action server |
 |------------|------|--------|---------------|
-| `arm_manipulator_controller` | `JointTrajectoryController` | BJ, SJ, EJ, W1J, W2J, W3J | `/arm_manipulator_controller/follow_joint_trajectory` |
-| `gripper_trajectory_controller` | `JointTrajectoryController` | finger_joint | `/gripper_trajectory_controller/follow_joint_trajectory` |
+| `arm_manipulator_controller` | `JointTrajectoryController` | BJ … W3J | `/arm_manipulator_controller/follow_joint_trajectory` |
+| `gripper_trajectory_controller` | `JointTrajectoryController` | `finger_joint` | `/gripper_trajectory_controller/follow_joint_trajectory` |
 | `joint_state_controller` | `JointStateController` | all | publishes `/joint_states` @ 50 Hz |
 
-Trajectory tolerances: ±0.1 rad per joint; goal time 1.0 s (arm), 0.6 s (gripper).
+PID gains per joint are loaded from `owr_gazebo/config/gazebo_ros_control_params.yaml`.
 
-### 2.2 ROS Interface
+| Topic | Type | Direction |
+|-------|------|-----------|
+| `/joint_states` | `sensor_msgs/JointState` | 50 Hz |
+| `/emergency_stop` | `std_msgs/Bool` | bidirectional |
+| `/arm_manipulator_controller/state` | `control_msgs/JointTrajectoryControllerState` | 50 Hz |
 
-| Topic / Action | Type | Direction |
-|----------------|------|-----------|
-| `/joint_states` | `sensor_msgs/JointState` | pub |
-| `/emergency_stop` | `std_msgs/Bool` | pub + sub |
-| `/arm_manipulator_controller/follow_joint_trajectory` | `control_msgs/FollowJointTrajectory` | action server |
-| `/gripper_trajectory_controller/follow_joint_trajectory` | `control_msgs/FollowJointTrajectory` | action server |
-| `/controller_manager/list_controllers` | `controller_manager_msgs/ListControllers` | service |
+Full interface reference (topics, services, actions, parameters, kinematics, launch args) → [docs/TECHNICAL_REFERENCE.md](docs/TECHNICAL_REFERENCE.md)
 
----
-
-## 3. MoveIt Configuration
-
-| Parameter | Value |
-|-----------|-------|
-| Planning group | `arm_manipulator` (BJ, SJ, EJ, W1J, W2J, W3J) |
-| IK solver | IKFast (`owr_gripper_arm_manipulator_kinematics`) |
-| Solver resolution | 0.005 rad |
-| Solver timeout | 5 ms |
-| Trajectory execution | via `FollowJointTrajectory` action |
-
-<img src="images/moveit_planning_flow.png" width=700>
+<img src="images/controller_stack.png" width="760">
+<img src="images/ros_interface.png" width="760">
+<img src="images/pid_control.png" width="760">
 
 ---
 
-## 4. Safety System
+## 4. Safety
 
-<img src="images/safety_workflow.png" width=600>
+Emergency stop is **latched** and broadcast on `/emergency_stop` (`std_msgs/Bool`). `owr_manipulation/safety_node.py` monitors `/joint_states` against the URDF hard limits (with a 0.05 rad margin) and repeats the hardware E-stop signal.
 
-**Three-layer enforcement:**
+| Layer | Enforcement |
+|-------|-------------|
+| Planning | MoveIt `joint_limits.yaml` bounds; goals beyond limits rejected |
+| Runtime | Controller goal tolerance ±0.1 rad |
+| Watchdog | `safety_node.py` — joint-limit check + E-stop latch @ 10 Hz |
+| Physical | URDF hard limits; hardware E-stop must cut motor power independently |
 
-1. **URDF hard limits** — physical joint bounds (see §1.2)
-2. **Controller tolerance** — ±0.1 rad goal/trajectory tolerance
-3. **MoveIt planning** — constrained to `joint_limits.yaml`; rejects goals beyond bounds
+> **Warning:** software-level emergency stop is NOT a substitute for a hardware E-stop circuit, which must disconnect motor power directly (e.g. RAMPS 1.4 power rail).
 
-**Emergency stop:** publish `std_msgs/Bool` to `/emergency_stop`. Safety node (`owr_manipulation/safety_node.py`) monitors `/joint_states` against URDF limits and triggers E-stop on violation.
-
-> ⚠ **Hardware E-stop button** must be wired directly to the servo driver — software E-stop is not a substitute.
-
----
-
-## 5. Packages
-
-```
-6-dof-robotic-arm-ros1-industrial/
-├── owr_description/          URDF, meshes, Gazebo plugins, transmission
-│   ├── urdf/                 owr.urdf.xacro, owr_robot.urdf.xacro, transmission, sensors
-│   └── meshes/collision/     STL collision meshes (7 links + gripper)
-├── owr_gazebo/               Gazebo launch, controllers, worlds, state publisher node
-│   ├── config/controllers.yaml
-│   ├── launch/               robot_6dof_gazebo_spawn.launch, owr_control.launch
-│   └── worlds/               demo, setup_1, setup_2, pick_place, factory
-├── owr_moveit_config/        MoveIt SRDF, IKFast config, joint limits, controller interface
-│   ├── config/               kinematics.yaml, joint_limits.yaml, controllers.yaml
-│   └── launch/               robot_6dof_moveit_sim.launch, fake/simple controllers
-├── owr_manipulation/         C++ nodes + Python safety node
-│   ├── src/                  ArmMotion, PickNPlace, joint_trajectory_control, planning_scene
-│   └── safety_node.py        Joint-limit watchdog + emergency stop
-├── images/                   21 technical diagrams (architecture, flow, IK, CI, etc.)
-└── docs/
-    ├── TECHNICAL_REFERENCE.md    Full engineering reference (kinematics, topics, controllers, build)
-    └── ROS1_INDUSTRIAL_CHECKLIST.md
-```
-
-<img src="images/workspace_structure.png" width=500>
+<img src="images/safety_stack.png" width="760">
 
 ---
 
-## 6. C++ Nodes (`owr_manipulation`)
+## 5. Perception
 
-| Node | Source | Purpose |
-|------|--------|---------|
-| `ArmMotion` | `src/ArmMotion.cpp` | Random joint-space trajectory smoke test |
-| `joint_trajectory_control` | `src/joint_trajectory_control.cpp` | Subscribe to `JointTrajectory`, forward to controller; E-stop aware |
-| `PickNPlace` | `src/PickNPlace.cpp` | Full pick-and-place sequence via MoveIt MoveGroup |
-| `PickNPlaceTest` | `src/PickNPlaceTest.cpp` | Automated test harness for PickNPlace |
-| `planning_scene_node` | `src/planning_scene.cpp` | Build static planning scene from point cloud |
+The arm builds its planning scene from an RGB-D camera: point cloud → voxel-grid filter → OctoMap → MoveIt collision world.
+
+| Stage | Topic | Rate |
+|-------|-------|------|
+| Raw RGB / depth | `/camera/rgb/image_raw`, `/camera/depth/image_raw` | 30 Hz |
+| Point cloud | `/camera/point_cloud` | 30 Hz |
+| Filtered cloud | `/camera/filtered_cloud` (leaf 1 cm) | 10 Hz |
+| OctoMap | `/world_octomap` (5 cm voxels) | 10 Hz |
+
+<img src="images/perception_detail.png" width="760">
+
+---
+
+## 6. Pick & Place
+
+`PickNPlace` (C++) runs a full sequence through the MoveIt `move_group` interface: **approach → descend → grasp → lift → transport → place → release → retreat**.
+
+<img src="images/pick_place_sm.png" width="560">
 
 ---
 
 ## 7. Quick Start
 
 ```bash
-# Build
+# 1. Build (Ubuntu 20.04, ROS Noetic desktop-full)
 mkdir -p ~/catkin_ws/src && cd ~/catkin_ws/src
 git clone https://github.com/sam-black007/6-dof-robotic-arm-ros1-industrial.git
 cd ~/catkin_ws && catkin_make && source devel/setup.bash
 
-# Terminal 1 — Gazebo
+# 2. Gazebo + arm (Terminal 1)
 roslaunch owr_gazebo robot_6dof_gazebo_spawn.launch gui:=true
 
-# Terminal 2 — MoveIt
+# 3. MoveIt + RViz (Terminal 2)
 roslaunch owr_moveit_config robot_6dof_moveit_sim.launch
 
-# Terminal 3 — Safety node
+# 4. Safety node (Terminal 3)
 rosrun owr_manipulation safety_node.py
+
+# 5. Smoke test motion (Terminal 4)
+rosrun owr_manipulation ArmMotion
 ```
 
-<img src="images/user_workflow.png" width=700>
-
-### Debug
+Verify:
 
 ```bash
-# Gazebo won't start
-pkill -9 gazebo && roslaunch owr_gazebo robot_6dof_gazebo_spawn.launch
-
-# MoveIt can't find controller
+rosnode list
+rostopic echo /joint_states -n1
 rosservice call /controller_manager/list_controllers
-
-# Joint limits exceeded
-cat owr_moveit_config/config/joint_limits.yaml
 ```
 
----
-
-## 8. CI / Quality Gates
-
-Every push runs on Ubuntu 20.04 + ROS Noetic:
-
-| Gate | What it checks |
-|------|----------------|
-| `catkin_make` | Build passes with no errors |
-| `roslaunch` (all launch files) | Launch files parse correctly |
-| `rostest` | Unit tests pass (planned — Task 8) |
-| `requirements.txt --check` | Pinned dependencies match |
-
-CI workflow: `.github/workflows/ros1-ci.yml`
-
-<img src="images/ci_pipeline.png" width=600>
+<img src="images/user_workflow.png" width="760">
 
 ---
 
-## 9. Deep Reference
+## 8. Continuous Integration
 
-**For full engineering details** — joint origins, controller configs, IK solver setup, URDF structure, frame tree, transmission hardware interface, build dependencies, and ROS 2 migration plan — see:
+`.github/workflows/ros1-ci.yml` builds and launches every package on Ubuntu 20.04 + ROS Noetic on each push.
 
-> **[docs/TECHNICAL_REFERENCE.md](docs/TECHNICAL_REFERENCE.md)**
-
----
-
-## 10. Other Diagrams
-
-| | |
-|---|---|
-| <img src="images/ik_solver_flow.png" width=340> | <img src="images/collision_checking.png" width=340> |
-| Inverse kinematics (IKFast) | Collision scene construction |
-| <img src="images/pick_place_flow.png" width=340> | <img src="images/control_modes.png" width=340> |
-| Pick-and-place sequence | Control interface modes |
-| <img src="images/safety.png" width=340> | <img src="images/launch_flow.png" width=340> |
-| Safety parameter reference | Launch sequence |
-| <img src="images/perception_pipeline.png" width=340> | <img src="images/ros1_vs_ros2.png" width=340> |
-| RGB-D perception pipeline | ROS 1 → ROS 2 decision |
-| <img src="images/overview.png" width=340> | <img src="images/hardening_summary.png" width=340> |
-| System overview | Industrial hardening summary |
+<img src="images/ci_pipeline.png" width="560">
 
 ---
 
-**License:** MIT · **Maintainer:** sam-black007 · **ROS 1 Noetic — EOL, maintenance only**
+## 9. Documentation
+
+| Document | Contents |
+|----------|----------|
+| [docs/TECHNICAL_REFERENCE.md](docs/TECHNICAL_REFERENCE.md) | Full engineering reference: kinematics, controllers, ROS interface, safety, perception, pick-and-place, build space |
+| [docs/ROS1_INDUSTRIAL_CHECKLIST.md](docs/ROS1_INDUSTRIAL_CHECKLIST.md) | Industrial hardening checklist |
+
+Additional diagrams: [workspace structure](images/workspace_structure.png) · [MoveIt planning pipeline](images/moveit_pipeline.png) · [ROS 1 vs ROS 2](images/ros1_vs_ros2.png) · [hardening summary](images/hardening_summary.png)
+
+---
+
+## 10. License & Maintenance
+
+MIT — see [LICENSE](LICENSE). Maintained by sam-black007. Issues and pull requests welcome.
+
+ROS 1 Noetic reached end of life; do not deploy for new production systems without a validated ROS 2 migration plan.

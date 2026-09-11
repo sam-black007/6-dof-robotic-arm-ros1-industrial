@@ -9,6 +9,9 @@
       <!-- Controllers config -->
       <rosparam file="$(find owr_gazebo)/config/controllers.yaml" command="load" />
 
+      <!-- PID gains for gazebo_ros_control -->
+      <rosparam file="$(find owr_gazebo)/config/gazebo_ros_control_params.yaml" command="load" />
+
       <!-- Load controllers -->
       <!-- <node name="owr_controller_spawner" pkg="controller_manager" type="spawner" respawn="false"
             output="$(arg DEBUG)"

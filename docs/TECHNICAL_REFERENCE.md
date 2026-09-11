@@ -138,33 +138,25 @@ Publishes `/joint_states` at 50 Hz. Type: `joint_state_controller/JointStateCont
 
 **Topic:** `/joint_group_position_controller/command` (`trajectory_msgs/JointTrajectory`)
 
-### 2.2 Gazebo PID Plugin (`owr.gazebo.xacro`)
+### 2.2 Gazebo PID Gains (`gazebo_ros_control_params.yaml`)
 
-Each joint is controlled in Gazebo via `gazebo_ros_control` with a PID position controller. The PID gains are set in the `<gazebo>` plugin block inside `owr.gazebo.xacro`:
+The arm is controlled in Gazebo via the `gazebo_ros_control` ROS interface with **position** PID control. Gains are loaded from `owr_gazebo/config/gazebo_ros_control_params.yaml` in `owr_control.launch`:
 
-```xml
-<plugin name="gazebo_ros_control" filename="libgazebo_ros_control.so">
-    <robotNamespace>/</robotNamespace>
-</plugin>
+```yaml
+gazebo_ros_control/pid_gains:
+  BJ:  {p: 100, d: 0.2,  i: 100}
+  SJ:  {p: 100, d: 1.0,  i: 200}
+  EJ:  {p: 100, d: 0.2,  i: 100}
+  W1J: {p: 100, d: 0.2,  i: 100}
+  W2J: {p: 100, d: 0.2,  i: 100}
+  W3J: {p: 100, d: 0.2,  i: 100}
 ```
-
-**Default PID gains (per joint):**
-
-| Joint | p    | i    | d    | chatter |
-|-------|------|------|------|---------|
-| BJ    | 100  | 0    | 0.1  | 10      |
-| SJ    | 100  | 0    | 0.1  | 10      |
-| EJ    | 100  | 0    | 0.1  | 10      |
-| W1J   | 100  | 0    | 0.1  | 10      |
-| W2J   | 100  | 0    | 0.1  | 10      |
-| W3J   | 100  | 0    | 0.1  | 10      |
-
-> **Note:** `chatter` is the `update_period` (seconds) for the PID update callback. At `chatter=10`, the PID loop updates every 10 s — this is unusually slow and suggests the actual PID is driven by Gazebo's internal physics step, not the ROS timer. In practice, the Gazebo physics step rate (default 1000 Hz) determines control frequency.
 
 **Tuning guide:**
 - Increase `p` for faster response (risk: oscillation).
-- Add `d` (0.01–0.5) to damp overshoot.
-- `i` is almost always 0 for position control — integral windup causes instability in Gazebo.
+- Keep `d` in the 0.2–1.0 range to damp overshoot; `SJ` carries the heaviest link (6.9 kg) and uses the largest derivative.
+- `i` is used here to eliminate steady-state droop from gravity; values >200 risk integral windup under sustained collision contact.
+- These gains are position-loop gains on the raw joint actuator (transmission ratio 1:1).
 
 ### 2.3 Transmission Hardware Interface
 
@@ -220,7 +212,10 @@ No velocity or effort interfaces are currently active. To switch to effort contr
 
 | Action | Type | Client |
 |--------|------|--------|
-| `/emergency_stop` | `actionlib/SimpleActionGoal<diagnostic_msgs/KeyValue>` | `safety_node` |
+| `/arm_manipulator_controller/follow_joint_trajectory` | `control_msgs/FollowJointTrajectory` | `MoveGroupInterface`, `ArmMotion`, `PickNPlace` |
+| `/gripper_trajectory_controller/follow_joint_trajectory` | `control_msgs/FollowJointTrajectory` | `MoveGroupInterface`, `PickNPlace` |
+
+> `safety_node` publishes `/emergency_stop` as a plain `std_msgs/Bool` **topic** (see §3.1); it does not use an action server.
 
 ---
 
@@ -357,70 +352,16 @@ Python 2/3 ROS node (under development) implementing:
 
 ### 6.2 Safety Node Implementation
 
-```python
-#!/usr/bin/env python
-"""
-Safety Node — Joint Limit Watchdog + Emergency Stop
-Publishes: /emergency_stop (std_msgs/Bool)
-Subscribes: /joint_states (sensor_msgs/JointState)
-            /emergency_stop (std_msgs/Bool) — from hardware button
-"""
+**Canonical source:** [`owr_manipulation/safety_node.py`](../owr_manipulation/safety_node.py)
 
-import rospy
-from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool
+The node runs as a standalone ROS process (`rosrun owr_manipulation safety_node.py`) and implements:
 
-# URDF hard limits (rad) — from owr.urdf.xacro
-JOINT_LIMITS = {
-    'BJ':    (-2.0944, 2.0944),
-    'SJ':    (-1.5708, 1.5708),
-    'EJ':    (-3.9270, 1.0472),
-    'W1J':   (-1.5708, 1.5708),
-    'W2J':   (-1.0472, 2.6180),
-    'W3J':   (-3.1416, 3.1416),
-}
-
-SAFETY_MARGIN = 0.05  # radians — trigger before hard limit
-
-class SafetyNode:
-    def __init__(self):
-        rospy.init_node('safety_node')
-        self.estop_pub = rospy.Publisher('/emergency_stop', Bool, queue_size=10)
-        self.joint_sub = rospy.Subscriber('/joint_states', JointState, self.joint_callback)
-        self.hardware_estop_sub = rospy.Subscriber('/emergency_stop', Bool, self.hardware_estop_callback)
-        self.estop_active = False
-        self.last_heartbeat = rospy.Time.now()
-
-    def joint_callback(self, msg):
-        for i, name in enumerate(msg.name):
-            if name in JOINT_LIMITS:
-                lower, upper = JOINT_LIMITS[name]
-                pos = msg.position[i]
-                if pos < lower + SAFETY_MARGIN or pos > upper - SAFETY_MARGIN:
-                    rospy.logwarn('JOINT LIMIT VIOLATION: %s = %.3f rad (limits: %.3f..%.3f)',
-                                  name, pos, lower, upper)
-                    self.estop_active = True
-                    self.estop_pub.publish(Bool(data=True))
-                    return
-        self.last_heartbeat = rospy.Time.now()
-
-    def hardware_estop_callback(self, msg):
-        if msg.data:
-            rospy.logwarn('HARDWARE E-STOP RECEIVED')
-            self.estop_active = True
-            self.estop_pub.publish(Bool(data=True))
-
-    def run(self):
-        rate = rospy.Rate(10)
-        while not rospy.is_shutdown():
-            if self.estop_active:
-                self.estop_pub.publish(Bool(data=True))
-            rate.sleep()
-
-if __name__ == '__main__':
-    node = SafetyNode()
-    node.run()
-```
+| Component | Detail |
+|-----------|--------|
+| Joint-limit watchdog | Subscribes to `/joint_states`; compares each joint's position against the URDF limits with a **0.05 rad margin**; latches emergency stop on breach. |
+| Emergency-stop latch | `std_msgs/Bool` published on `/emergency_stop` at **10 Hz**; once latched, remains active until the node is restarted. |
+| Hardware E-stop input | Subscribes to `/emergency_stop` from an external button; mirrors it by re-publishing. |
+| Finger guard | Checks `finger_joint` against 0.0–0.04 m and trips on over-travel. |
 
 ### 6.3 Joint Limit Enforcement
 

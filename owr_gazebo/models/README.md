@@ -1,9 +1,15 @@
-The mesh files for models listed below were obtained from http://rll.berkeley.edu/amazon_picking_challenge/
+# Model provenance
+
+The manipulation scene models used by the demo worlds are taken from the
+Amazon Picking Challenge (APC), originally obtained from
+http://rll.berkeley.edu/amazon_picking_challenge/
+
 - biscuits
-- book
 - eraser
-- glue
-- snacks
 - soap
 - soap2
-- sticky_notes
+
+These APC meshes are used by `pick_place.world` and `setup_1.world` as
+graspable objects. All other scene assets (tables, dropbox, kinect sensor,
+ur5 mount) are stock Gazebo models referenced through `GAZEBO_MODEL_PATH`,
+which the launch file sets to this directory.
